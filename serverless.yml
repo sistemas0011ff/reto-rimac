@@ -1,0 +1,491 @@
+service: mas-v001
+
+plugins:
+  - serverless-webpack
+  - serverless-dynamodb-local
+  - serverless-offline-sns
+  - serverless-offline-sqs
+  - serverless-offline
+  - serverless-offline-scheduler
+  - serverless-dotenv-plugin
+
+custom:
+  webpack:
+    webpackConfig: 'webpack.config.js'
+    includeModules: true
+  dynamodb:
+    stages:
+      - dev
+    noInstall: true
+    dockerImage: 'amazon/dynamodb-local'
+    docker: true
+    start:
+      port: 8000
+      inMemory: true
+      migrate: true
+      convertEmptyValues: true
+      noStart: true
+      seed:
+        domain:
+          sources:
+            - table: Appointments-v001-${self:provider.stage}
+              sources: [./seeds/appointments.json]
+  serverless-offline-sns:
+    port: 4002
+    debug: true
+  serverless-offline-sqs:
+    autoCreate: true
+    apiVersion: '2012-11-05'
+    endpoint: http://localhost:9324
+    region: us-east-2
+    accessKeyId: ''
+    secretAccessKey: ''
+    skipCacheInvalidation: false
+    queuePrefix: ${self:provider.stage}
+  eventBridgeLocal:
+    port: 4010
+  serverless-offline:
+    noAuth: true
+    skipCacheInvalidation: true
+    lambda:
+      timeout: 30
+  # Variables de entorno condicionales
+  environment:
+    local:
+      DYNAMODB_ENDPOINT: http://localhost:8000
+      SNS_ENDPOINT: http://localhost:4002
+      SQS_ENDPOINT: http://localhost:9324
+      EVENT_BRIDGE_ENDPOINT: http://localhost:4010
+      IS_OFFLINE: false
+    dev:
+      DYNAMODB_ENDPOINT: ''
+      SNS_ENDPOINT: ''
+      SQS_ENDPOINT: ''
+      EVENT_BRIDGE_ENDPOINT: ''
+      IS_OFFLINE: false
+  # Configuración para dotenv plugin
+  dotenv:
+    exclude:
+      # Excluir variables AWS reservadas para evitar conflictos
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_REGION
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  stage: ${opt:stage, 'dev'}
+  region: us-east-2
+  # Habilitar X-Ray tracing
+  tracing:
+    lambda: true
+    apiGateway: true
+  
+  environment:
+    # Variables de aplicación seguras para Lambda
+    STAGE: ${self:provider.stage}
+    REGION: ${self:provider.region}
+    
+    # Variables condicionales según el entorno (vacías en AWS)
+    DYNAMODB_ENDPOINT: ${self:custom.environment.${self:provider.stage, 'dev'}.DYNAMODB_ENDPOINT, ''}
+    SNS_ENDPOINT: ${self:custom.environment.${self:provider.stage, 'dev'}.SNS_ENDPOINT, ''}
+    SQS_ENDPOINT: ${self:custom.environment.${self:provider.stage, 'dev'}.SQS_ENDPOINT, ''}
+    EVENT_BRIDGE_ENDPOINT: ${self:custom.environment.${self:provider.stage, 'dev'}.EVENT_BRIDGE_ENDPOINT, ''}
+    IS_OFFLINE: ${self:custom.environment.${self:provider.stage, 'dev'}.IS_OFFLINE, false}
+    
+    # Conexiones MySQL - Perú 
+    PE_DB_HOST: ${env:PE_DB_HOST, 'dbreto-rimac.chg6ac68oakf.us-east-2.rds.amazonaws.com'}
+    PE_DB_USER: ${env:PE_DB_USER, 'admin'}
+    PE_DB_PASSWORD: ${env:PE_DB_PASSWORD, 'Inicios20222022$$$$$$'}
+    PE_DB_NAME: ${env:PE_DB_NAME, 'medical_appointments_pe'}
+    PE_DB_PORT: ${env:PE_DB_PORT, '3306'}
+    
+    # Conexiones MySQL - Chile 
+    CL_DB_HOST: ${env:CL_DB_HOST, 'dbreto-rimac.chg6ac68oakf.us-east-2.rds.amazonaws.com'}
+    CL_DB_USER: ${env:CL_DB_USER, 'admin'}
+    CL_DB_PASSWORD: ${env:CL_DB_PASSWORD, 'Inicios20222022$$$$$$'}
+    CL_DB_NAME: ${env:CL_DB_NAME, 'medical_appointments_cl'}
+    CL_DB_PORT: ${env:CL_DB_PORT, '3306'}
+    
+    # APIs externas
+    SWAPI_BASE_URL: ${env:SWAPI_BASE_URL, 'http://swapi.py4e.com/api'}
+    EARTH_API_BASE_URL: ${env:EARTH_API_BASE_URL, 'https://api.le-systeme-solaire.net/rest'}
+    
+    # Variables LOCAL_* en lugar de las reservadas AWS_*
+    LOCAL_AWS_REGION: ${env:LOCAL_AWS_REGION, 'us-east-2'}
+  
+  iamRoleStatements:
+    # Permisos para X-Ray
+    - Effect: Allow
+      Action:
+        - xray:PutTraceSegments
+        - xray:PutTelemetryRecords
+      Resource: "*"
+    # Permisos para DynamoDB
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+        - dynamodb:Scan
+        - dynamodb:GetItem
+        - dynamodb:PutItem
+        - dynamodb:UpdateItem
+        - dynamodb:DeleteItem
+      Resource: !GetAtt AppointmentsTable.Arn
+    - Effect: Allow
+      Action:
+        - dynamodb:Query
+      Resource: !Sub "${AppointmentsTable.Arn}/index/*"
+    # Permisos para SNS
+    - Effect: Allow
+      Action:
+        - sns:Publish
+        - sns:Subscribe
+        - sns:Unsubscribe
+      Resource:
+        - !Ref PeruAppointmentTopic
+        - !Ref ChileAppointmentTopic
+    # Permisos para SQS
+    - Effect: Allow
+      Action:
+        - sqs:SendMessage
+        - sqs:ReceiveMessage
+        - sqs:DeleteMessage
+        - sqs:GetQueueAttributes
+        - sqs:GetQueueUrl
+        - sqs:ListQueues
+      Resource:
+        - !GetAtt PeruAppointmentQueue.Arn
+        - !GetAtt ChileAppointmentQueue.Arn
+        - !GetAtt AppointmentCompletedQueue.Arn
+    # Permisos para EventBridge
+    - Effect: Allow
+      Action:
+        - events:PutEvents
+        - events:PutRule
+        - events:PutTargets
+      Resource: "*"
+    # Permisos para VPC -  ACCESO A RDS
+    - Effect: Allow
+      Action:
+        - ec2:CreateNetworkInterface
+        - ec2:DescribeNetworkInterfaces
+        - ec2:DeleteNetworkInterface
+        - ec2:AttachNetworkInterface
+        - ec2:DetachNetworkInterface
+        - ec2:DescribeSecurityGroups
+        - ec2:DescribeSubnets
+        - ec2:DescribeVpcs
+      Resource: "*"
+
+functions:
+  # Handler principal para crear y consultar citas
+  appointmentHandler:
+    handler: src/app/handlers/appointment/appointment.handler
+    timeout: 30
+    events:
+      - http:
+          path: appointment
+          method: post
+          cors: true
+      - http:
+          path: appointment/{insuredId}
+          method: get
+          cors: true
+          request:
+            parameters:
+              paths:
+                insuredId: true
+    environment:
+      PERU_TOPIC_ARN: !Ref PeruAppointmentTopic
+      CHILE_TOPIC_ARN: !Ref ChileAppointmentTopic
+      APPOINTMENTS_TABLE: !Ref AppointmentsTable
+      EVENT_BUS_NAME: !Ref AppointmentEventBus
+  getAppointmentsByInsuredHandler:
+    handler: src/app/handlers/appointment/get_by_insured.handler
+    timeout: 30
+    events:
+      - http:
+          path: appointment/{insuredId}
+          method: get
+          cors: true
+          request:
+            parameters:
+              paths:
+                insuredId: true
+    environment:
+      APPOINTMENTS_TABLE: !Ref AppointmentsTable    
+  # Handler para procesar citas de Perú
+  appointmentPeruHandler:
+    handler: src/app/handlers/appointment/appointment_pe.handler
+    timeout: 30
+    # CONFIGURACIÓN VPC ESPECÍFICA
+    vpc:
+      securityGroupIds:
+        - sg-0017dcb23a1cf69cd  # Security Group con acceso a RDS
+      subnetIds:
+        - subnet-021fd4e501e8e96b3
+        - subnet-0ac4fae8eec3f5a18
+        - subnet-04529b39833629024
+    events:
+      - sqs:
+          arn: !GetAtt PeruAppointmentQueue.Arn
+          batchSize: 1
+    environment:
+      EVENT_BUS_NAME: !Ref AppointmentEventBus
+      APPOINTMENTS_TABLE: !Ref AppointmentsTable
+      
+  # Handler para procesar citas de Chile 
+  appointmentChileHandler:
+    handler: src/app/handlers/appointment/appointment_cl.handler
+    timeout: 30  # 
+    # CONFIGURACIÓN VPC ESPECÍFICA
+    vpc:
+      securityGroupIds:
+        - sg-0017dcb23a1cf69cd  # Security Group con acceso a RDS
+      subnetIds:
+        - subnet-021fd4e501e8e96b3
+        - subnet-0ac4fae8eec3f5a18
+        - subnet-04529b39833629024
+    events:
+      - sqs:
+          arn: !GetAtt ChileAppointmentQueue.Arn
+          batchSize: 1
+    environment:
+      EVENT_BUS_NAME: !Ref AppointmentEventBus
+      APPOINTMENTS_TABLE: !Ref AppointmentsTable
+      
+  # Handler para procesar confirmaciones de citas completadas
+  appointmentCompletedHandler:
+    handler: src/app/handlers/appointment/appointment_completed.handler
+    timeout: 30
+    events:
+      - sqs:
+          arn: !GetAtt AppointmentCompletedQueue.Arn
+          batchSize: 1
+    environment:
+      APPOINTMENTS_TABLE: !Ref AppointmentsTable
+      EVENT_BUS_NAME: !Ref AppointmentEventBus      
+  # Swagger Documentation
+  swaggerUIHandler:
+    handler: src/app/handlers/swaggerUIHandler.handler
+    timeout: 15
+    events:
+      - http:
+          path: docs
+          method: get
+          cors: true
+
+resources:
+  Resources:
+    # DynamoDB Table para almacenar citas
+    AppointmentsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: Appointments-v001-${self:provider.stage}
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: id
+            AttributeType: S
+          - AttributeName: insuredId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: InsuredIndex
+            KeySchema:
+              - AttributeName: insuredId
+                KeyType: HASH
+            Projection:
+              ProjectionType: ALL
+        StreamSpecification:
+          StreamViewType: NEW_AND_OLD_IMAGES
+              
+    # SNS Topics por país
+    PeruAppointmentTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: appointment-pe-topic-v001-${self:provider.stage}
+        DisplayName: "Topic for Peru Appointments"
+        
+    ChileAppointmentTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: appointment-cl-topic-v001-${self:provider.stage}
+        DisplayName: "Topic for Chile Appointments"
+        
+    # SNS Subscriptions - Conectar topics con colas SQS
+    PeruAppointmentSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: !Ref PeruAppointmentTopic
+        Protocol: sqs
+        Endpoint: !GetAtt PeruAppointmentQueue.Arn
+        FilterPolicy:
+          countryISO: ["PE"]
+          
+    ChileAppointmentSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn: !Ref ChileAppointmentTopic
+        Protocol: sqs
+        Endpoint: !GetAtt ChileAppointmentQueue.Arn
+        FilterPolicy:
+          countryISO: ["CL"]
+        
+    # SQS Queues para procesamiento por país
+    PeruAppointmentQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-pe-queue-v001-${self:provider.stage}
+        MessageRetentionPeriod: 600  # 10 minutos
+        DelaySeconds: 5  
+        VisibilityTimeout: 120  # 2 minutos
+        ReceiveMessageWaitTimeSeconds: 5  # Long polling
+        
+    ChileAppointmentQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-cl-queue-v001-${self:provider.stage}
+        MessageRetentionPeriod: 600  # 10 minutos
+        DelaySeconds: 5  
+        VisibilityTimeout: 120  # 2 minutos
+        ReceiveMessageWaitTimeSeconds: 5  # Long polling
+        
+    # Cola para confirmaciones de citas completadas
+    AppointmentCompletedQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointment-completed-queue-v001-${self:provider.stage}
+        MessageRetentionPeriod: 600  # 10 minutos
+        DelaySeconds: 5  # retraso de 30 segundos
+        VisibilityTimeout: 120  # 2 minutos
+        ReceiveMessageWaitTimeSeconds: 5  # Long polling
+    
+    # SQS Queue Policies - Permisos para que SNS envíe mensajes a SQS
+    PeruQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "sqs:SendMessage"
+              Resource: !GetAtt PeruAppointmentQueue.Arn
+              Condition:
+                ArnEquals:
+                  "aws:SourceArn": !Ref PeruAppointmentTopic
+        Queues:
+          - !Ref PeruAppointmentQueue
+          
+    ChileQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: "sqs:SendMessage"
+              Resource: !GetAtt ChileAppointmentQueue.Arn
+              Condition:
+                ArnEquals:
+                  "aws:SourceArn": !Ref ChileAppointmentTopic
+        Queues:
+          - !Ref ChileAppointmentQueue
+          
+    # EventBridge Bus para eventos de dominio
+    AppointmentEventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: appointment-event-bus-v001-${self:provider.stage}
+        
+    # ✅ Regla para capturar eventos de citas completadas
+    AppointmentCompletedRule:
+      Type: AWS::Events::Rule
+      Properties:
+        EventBusName: !Ref AppointmentEventBus
+        EventPattern:
+          source:
+            - "custom.appointment"
+          detail-type:
+            - "appointment.completed"
+        Targets:
+          - Arn: !GetAtt AppointmentCompletedQueue.Arn
+            Id: "AppointmentCompletedTarget"
+            
+    # ✅ VPC Endpoint para EventBridge 
+    EventBridgeVPCEndpoint:
+      Type: AWS::EC2::VPCEndpoint
+      Properties:
+        VpcId: vpc-0a6ba2de9cce21d1c 
+        ServiceName: com.amazonaws.us-east-2.events
+        VpcEndpointType: Interface
+        SubnetIds:
+          - subnet-021fd4e501e8e96b3
+          - subnet-0ac4fae8eec3f5a18
+          - subnet-04529b39833629024
+        SecurityGroupIds:
+          - sg-0017dcb23a1cf69cd  # Security Group que usan las Lambdas
+        PrivateDnsEnabled: true
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action:
+                - events:PutEvents
+                - events:PutRule
+                - events:PutTargets
+              Resource: "*"
+            
+    # ✅ Política para permitir que EventBridge envíe mensajes a la cola de completados
+    AppointmentCompletedQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: "sqs:SendMessage"
+              Resource: !GetAtt AppointmentCompletedQueue.Arn
+              Condition:
+                ArnEquals:
+                  "aws:SourceArn": !GetAtt AppointmentCompletedRule.Arn
+        Queues:
+          - !Ref AppointmentCompletedQueue
+
+  # Outputs para referencia
+  Outputs:
+    ApiGatewayRestApiId:
+      Value: !Ref ApiGatewayRestApi
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ApiGatewayRestApiId
+        
+    AppointmentsTableName:
+      Value: !Ref AppointmentsTable
+      Export:
+        Name: ${self:service}-${self:provider.stage}-AppointmentsTable
+        
+    PeruTopicArn:
+      Value: !Ref PeruAppointmentTopic
+      Export:
+        Name: ${self:service}-${self:provider.stage}-PeruTopic
+        
+    ChileTopicArn:
+      Value: !Ref ChileAppointmentTopic
+      Export:
+        Name: ${self:service}-${self:provider.stage}-ChileTopic
+        
+    EventBusName:
+      Value: !Ref AppointmentEventBus
+      Export:
+        Name: ${self:service}-${self:provider.stage}-EventBus
+            
+    EventBridgeVPCEndpointId:
+      Value: !Ref EventBridgeVPCEndpoint
+      Export:
+        Name: ${self:service}-${self:provider.stage}-EventBridgeVPCEndpoint
